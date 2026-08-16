@@ -43,7 +43,7 @@ export class AuditLog {
     const ts   = new Date().toISOString()
     const prev = seq === 0 ? null : hashEntry(all[seq - 1])
     const msg  = signingBytes(seq, ts, operation, metadata, prev)
-    const sig  = mlDsa.ml_dsa65.sign(new Uint8Array(this.#keypair.secretKey), msg)
+    const sig  = Buffer.from(mlDsa.sign(new Uint8Array(this.#keypair.secretKey), msg), 'hex')
 
     const entry = { seq, timestamp: ts, operation, metadata, prevHash: prev, signature: b64url(sig) }
     await this._store(entry)
@@ -71,7 +71,7 @@ export class AuditLog {
       }
       const msg = signingBytes(e.seq, e.timestamp, e.operation, e.metadata, e.prevHash)
       let ok
-      try { ok = mlDsa.ml_dsa65.verify(new Uint8Array(publicKey), msg, fromB64url(e.signature)) }
+      try { ok = mlDsa.verify(new Uint8Array(publicKey), msg, Buffer.from(fromB64url(e.signature)).toString('hex')) }
       catch { ok = false }
       if (!ok) return { valid: false, error: `entry ${i}: signature invalid` }
     }
