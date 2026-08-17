@@ -1,5 +1,5 @@
 import { mlDsa } from 'kxco-post-quantum'
-import { sha256 } from '@noble/hashes/sha2'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { KxcoPqAuditError } from './errors.js'
 
 const enc = new TextEncoder()
