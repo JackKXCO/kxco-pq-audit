@@ -17,7 +17,9 @@ issues:
     action: warn
 
 # kxco-post-quantum — maintained by this organisation.
-# @noble/hashes — audited by Cure53 (2024), no transitive deps.
+# @noble/hashes — audited by Cure53 in Jan 2022 (v1.0.0), no transitive deps.
+# Note: @noble/post-quantum, reached via kxco-post-quantum, has been audited by
+# NOBODY. It is self-audited by its maintainer only.
 ignore:
   - "kxco-post-quantum"
   - "@noble/hashes"
