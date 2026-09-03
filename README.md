@@ -172,7 +172,19 @@ The checkpoint provides an on-chain timestamp proving that at least N entries ex
 
 ## Security
 
-Entry signing uses [Noble post-quantum](https://github.com/paulmillr/noble-post-quantum) ML-DSA-65 (NIST FIPS 204) and [Noble hashes](https://github.com/paulmillr/noble-hashes) SHA-256 — independently audited by Cure53 (2024). The hash chain means a compromised or deleted entry cannot be hidden: any gap breaks verification of every subsequent entry.
+**ML-DSA-65** (NIST FIPS 204) via [`kxco-post-quantum`](https://www.npmjs.com/package/kxco-post-quantum), running on the OpenSSL 3.5 primitives where the runtime provides them. No custom cryptography.
+
+Evidenced, and reproducible on your own machine:
+
+- **2,103 NIST ACVP vectors** across FIPS 203, 204 and 205, pinned by digest
+- **225 interoperability checks** against OpenSSL 3.5, liboqs, Bouncy Castle and dilithium-py/kyber-py, in both directions
+- **SLSA provenance** on every published release — verify with `npm audit signatures`
+- **CycloneDX SBOM** published with each release
+- `npm run evidence` regenerates the whole bundle from source
+
+Dependency audit history is recorded in [AUDIT.md](https://github.com/KnightsbridgeAIQ/kxco-post-quantum/blob/main/AUDIT.md).
+
+The hash chain means a compromised or deleted entry cannot be hidden: any gap breaks verification of every subsequent entry.
 
 To report a vulnerability, open a [private security advisory](https://github.com/KnightsbridgeAIQ/kxco-pq-audit/security/advisories/new) or email **security@kxco.ai**.
 
