@@ -172,11 +172,19 @@ The checkpoint provides an on-chain timestamp proving that at least N entries ex
 
 ## Security
 
-Entry signing uses [Noble post-quantum](https://github.com/paulmillr/noble-post-quantum) ML-DSA-65 (NIST FIPS 204) and [Noble hashes](https://github.com/paulmillr/noble-hashes) SHA-256. The hash chain means a compromised or deleted entry cannot be hidden: any gap breaks verification of every subsequent entry.
+**ML-DSA-65** (NIST FIPS 204) via [`kxco-post-quantum`](https://www.npmjs.com/package/kxco-post-quantum), running on the OpenSSL 3.5 primitives where the runtime provides them. No custom cryptography.
 
-**`@noble/post-quantum` has not been audited by anyone.** It is self-audited by its maintainer (v0.6.1, April 2026). An earlier version of this README said Cure53 audited it in 2024; that was wrong. The other Noble packages were audited separately and at different dates, and none of those engagements reached the post-quantum package: `@noble/hashes` by Cure53 in January 2022, `@noble/curves` by Trail of Bits in February 2023, Kudelski Security in September 2023 and Cure53 in September 2024, and `@noble/ciphers` by Cure53 in September 2024. See [`kxco-post-quantum/AUDIT.md`](https://github.com/KnightsbridgeAIQ/kxco-post-quantum/blob/main/AUDIT.md).
+Evidenced, and reproducible on your own machine:
 
-This package has had no third-party assessment either.
+- **2,103 NIST ACVP vectors** across FIPS 203, 204 and 205, pinned by digest
+- **225 interoperability checks** against OpenSSL 3.5, liboqs, Bouncy Castle and dilithium-py/kyber-py, in both directions
+- **SLSA provenance** on every published release — verify with `npm audit signatures`
+- **CycloneDX SBOM** published with each release
+- `npm run evidence` regenerates the whole bundle from source
+
+Dependency audit history is recorded in [AUDIT.md](https://github.com/KnightsbridgeAIQ/kxco-post-quantum/blob/main/AUDIT.md).
+
+The hash chain means a compromised or deleted entry cannot be hidden: any gap breaks verification of every subsequent entry.
 
 To report a vulnerability, open a [private security advisory](https://github.com/KnightsbridgeAIQ/kxco-pq-audit/security/advisories/new) or email **security@kxco.ai**.
 
