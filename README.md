@@ -151,12 +151,18 @@ The anchor is fire-and-forget: `append` does not await it, so chain latency neve
 
 The checkpoint provides an on-chain timestamp proving that at least N entries existed at a specific block height. This supplements the local NDJSON file for long-term tamper evidence, particularly where the log operator and the verifier are separate parties.
 
-## What this does NOT do
+## Where this fits
 
-- **Not a database.** Entries cannot be queried by field, filtered, or indexed. Read the file line by line.
-- **Not queryable.** There is no search API. If you need search, index entries into a database alongside the NDJSON file.
-- **Append-only.** Entries cannot be edited or deleted without breaking `verify()`. This is intentional.
-- **Not a transport.** This package writes and verifies. It does not expose HTTP endpoints or stream entries to external systems.
+An append-only, ML-DSA-65-signed, hash-chained record. **Entries cannot be
+edited or deleted without `verify()` failing and naming the entry** — that is
+the guarantee, and the reason to use it.
+
+It writes and verifies a file. Reading is line by line, so index entries into
+your own database if you need search, and checkpoint to Armature L1 when a
+regulator needs an anchor they can confirm on-chain.
+
+- [`kxco-pq-chain`](https://www.npmjs.com/package/kxco-pq-chain) for the checkpoint anchor
+- [`kxco-pq-attest`](https://www.npmjs.com/package/kxco-pq-attest) for signed envelopes that travel on their own
 
 ## Part of the KXCO stack
 
