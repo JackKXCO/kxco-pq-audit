@@ -1,5 +1,82 @@
 # Changelog
 
+## 1.3.0
+
+### Added
+
+`sealed: true` signs once per run instead of once per entry.
+
+Every entry is still hash-chained, which is what detects an edit, a removal, a
+reorder or an insertion. The per-entry signature only bound one entry to the
+key, and it was the entire cost of the log. Measured here on ML-DSA-65 over
+10,000 entries:
+
+| | entries/s | bytes/entry | verify |
+|---|---|---|---|
+| per entry | 129 | 4,794 | 20.1 s |
+| per run | 46,544 | 367 | 0.11 s |
+
+Of those 4,794 bytes, 4,412 were the signature. Any workload with real entry
+volume, agent tool calls being the case this was built for, cannot afford one
+signature per entry.
+
+`seal()` returns the run it signed, or null when nothing is unsealed. `seals()`
+returns them all. Seals chain to each other by `prevRoot`, so removing an entire
+seal breaks the one after it, the same way removing an entry breaks the next
+entry's `prevHash`. `FileAuditLog` writes them to `<path>.seals`.
+
+`verify()` on a sealed log reports `sealedThrough` and `unsealed`. Entries
+appended since the last seal are chained and unsigned, and that window is
+reported rather than counted as proven.
+
+Two things it costs: a single entry can no longer be verified on its own, only
+as part of its run, and the unsealed window is real until `seal()` runs.
+
+Default is unchanged. A log built without the option behaves exactly as before,
+signature per entry included.
+
+`stream()` yields entries one at a time, and `unsealedCount()` reports the
+window without replaying the log.
+
+### Fixed
+
+**Concurrent appends forked the chain.** Every `append()` read the log to find
+the next seq, so two in flight together both read the same tail and both claimed
+it. Fifty parallel appends produced fifty entries all numbered `seq 0`, and the
+resulting log fails its own `verify()`. Writes are now serialised internally, so
+the same fifty produce seq 0 to 49 and verify clean. Any log written
+concurrently under 1.2.3 or earlier should be checked with `verify()`.
+
+**Appending was quadratic.** `append()` loaded every entry to work out the next
+seq and prevHash, and `FileAuditLog` re-read and re-parsed the whole file each
+time. A log now loads once and keeps only the tail, so cost per entry no longer
+depends on length.
+
+| entries | before | after |
+|---|---|---|
+| 500 | 1,635 us/entry | 66 us/entry |
+| 2,000 | 2,279 us/entry | 66 us/entry |
+| 4,000 | 3,262 us/entry | 66 us/entry |
+| 50,000 | not measured, still climbing | 66 us/entry |
+
+`FileAuditLog` also holds one write handle rather than reopening the file per
+entry, which is ~46us a write against ~421us. It is released after 2 seconds
+idle, so forgetting `close()` costs nothing, and `close()` is there for a
+deterministic hand-back.
+
+**`verify()` loaded the whole log to check it.** It now streams, so memory is
+bounded by one entry and the seal list. 50,000 entries verify in 729 ms.
+
+### Added, smaller
+
+`FileAuditLog` refuses to append to a file that changed size underneath it,
+rather than forking the chain and failing much later at `verify()`. One file has
+one writer; `assertSoleWriter()` checks it on demand and runs on every seal and
+close.
+
+A line that will not parse is now named with its line number and told apart from
+a torn final line, instead of surfacing as a bare `SyntaxError`.
+
 ## 1.2.3
 
 ### Corrected

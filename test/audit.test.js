@@ -71,6 +71,121 @@ describe('AuditLog (memory)', () => {
   })
 })
 
+describe('AuditLog (sealed)', () => {
+  const run = async (n = 5) => {
+    const log = new AuditLog({ keypair, sealed: true })
+    for (let i = 0; i < n; i++) await log.append('tool_call', { step: i })
+    return log
+  }
+
+  test('entries carry no signature, and the run does', async () => {
+    const log = await run(3)
+    const entries = await log.export()
+    assert.ok(entries.every(e => e.signature === undefined))
+    assert.ok(entries.every(e => e.prevHash !== undefined))
+    const seal = await log.seal()
+    assert.equal(seal.fromSeq, 0)
+    assert.equal(seal.toSeq, 2)
+    assert.equal(seal.entryCount, 3)
+    assert.ok(seal.signature)
+  })
+
+  test('a sealed run verifies', async () => {
+    const log = await run(5)
+    await log.seal()
+    const result = await log.verify(keypair.publicKey)
+    assert.equal(result.valid, true)
+    assert.equal(result.count, 5)
+    assert.equal(result.unsealed, 0)
+    assert.equal(result.sealedThrough, 4)
+  })
+
+  test('an unsealed tail is reported, never counted as proven', async () => {
+    const log = await run(5)
+    await log.seal()
+    await log.append('tool_call', { step: 5 })
+    await log.append('tool_call', { step: 6 })
+    const result = await log.verify(keypair.publicKey)
+    assert.equal(result.valid, true)
+    assert.equal(result.sealedThrough, 4)
+    assert.equal(result.unsealed, 2)
+  })
+
+  test('seal() returns null when nothing is unsealed', async () => {
+    const log = await run(3)
+    assert.ok(await log.seal())
+    assert.equal(await log.seal(), null)
+  })
+
+  test('successive seals chain to each other', async () => {
+    const log = await run(3)
+    const first = await log.seal()
+    await log.append('tool_call', { step: 3 })
+    const second = await log.seal()
+    assert.equal(second.prevRoot, first.rootHash)
+    assert.equal(second.fromSeq, 3)
+    const result = await log.verify(keypair.publicKey)
+    assert.equal(result.valid, true)
+    assert.equal(result.unsealed, 0)
+  })
+
+  test('editing a sealed entry breaks the run', async () => {
+    const log = await run(5)
+    await log.seal()
+    const entries = await log.export()
+    entries[2].metadata.step = 99
+    log._entries = async () => entries
+    const result = await log.verify(keypair.publicKey)
+    assert.equal(result.valid, false)
+    assert.match(result.error, /prevHash mismatch|reproduce rootHash/)
+  })
+
+  test('removing a sealed entry breaks the run', async () => {
+    const log = await run(5)
+    await log.seal()
+    const entries = (await log.export()).filter(e => e.seq !== 2)
+    log._entries = async () => entries
+    const result = await log.verify(keypair.publicKey)
+    assert.equal(result.valid, false)
+  })
+
+  test('dropping a whole seal breaks the seal that follows it', async () => {
+    const log = await run(3)
+    await log.seal()
+    await log.append('tool_call', { step: 3 })
+    await log.seal()
+    const seals = (await log.seals()).slice(1)
+    log._seals = async () => seals
+    const result = await log.verify(keypair.publicKey)
+    assert.equal(result.valid, false)
+    assert.match(result.error, /expected fromSeq 0/)
+  })
+
+  test('a seal signed by another key is refused', async () => {
+    const log = await run(3)
+    await log.seal()
+    const other = mlDsa.ml_dsa65.keygen()
+    const result = await log.verify(other.publicKey)
+    assert.equal(result.valid, false)
+    assert.match(result.error, /seal 0: signature invalid/)
+  })
+
+  test('seal() on a classic log throws rather than signing nothing', async () => {
+    const log = new AuditLog({ keypair })
+    await log.append('op', {})
+    await assert.rejects(() => log.seal(), /requires sealed/)
+  })
+
+  test('a classic log is unchanged by the option existing', async () => {
+    const log = new AuditLog({ keypair })
+    const entry = await log.append('keygen', { label: 'k1' })
+    assert.ok(entry.signature)
+    const result = await log.verify(keypair.publicKey)
+    assert.equal(result.valid, true)
+    assert.equal(result.unsealed, undefined)
+  })
+})
+
 describe('FileAuditLog', () => {
   const path = join(tmpdir(), `kxco-audit-test-${process.pid}.ndjson`)
   after(() => { try { unlinkSync(path) } catch { /* ok */ } })
@@ -80,11 +195,14 @@ describe('FileAuditLog', () => {
     await log1.append('keygen', { label: 'k1' })
     await log1.append('sign',   { label: 'k1' })
 
+    await log1.close()
+
     const log2 = new FileAuditLog({ keypair, path })
     const entries = await log2.export()
     assert.equal(entries.length, 2)
     assert.equal(entries[0].operation, 'keygen')
     assert.equal(entries[1].operation, 'sign')
+    await log2.close()
   })
 
   test('verify passes on persisted log', async () => {
@@ -99,6 +217,7 @@ describe('FileAuditLog', () => {
     try {
       const log = new FileAuditLog({ keypair, path: p })
       await log.append('keygen', { label: 'k1' })
+      await log.close()
       const entry = JSON.parse(readFileSync(p, 'utf8').trim())
       entry.operation = 'delete'
       writeFileSync(p, JSON.stringify(entry) + '\n')
@@ -107,12 +226,103 @@ describe('FileAuditLog', () => {
     } finally { try { unlinkSync(p) } catch { /* ok */ } }
   })
 
+  test('sealed: seals persist across instances alongside the entries', async () => {
+    const p = join(tmpdir(), `kxco-audit-sealed-${process.pid}.ndjson`)
+    try {
+      const log1 = new FileAuditLog({ keypair, path: p, sealed: true })
+      await log1.append('tool_call', { step: 0 })
+      await log1.append('tool_call', { step: 1 })
+      await log1.seal()
+      await log1.close()
+
+      const log2 = new FileAuditLog({ keypair, path: p, sealed: true })
+      assert.equal((await log2.seals()).length, 1)
+      const result = await log2.verify(keypair.publicKey)
+      assert.equal(result.valid, true)
+      assert.equal(result.count, 2)
+      assert.equal(result.unsealed, 0)
+    } finally {
+      try { unlinkSync(p) } catch { /* ok */ }
+      try { unlinkSync(p + '.seals') } catch { /* ok */ }
+    }
+  })
+
+  test('appending in parallel does not fork the chain', async () => {
+    const p = join(tmpdir(), `kxco-audit-parallel-${process.pid}.ndjson`)
+    try {
+      const log = new FileAuditLog({ keypair, path: p, sealed: true })
+      await Promise.all(
+        Array.from({ length: 50 }, (_, i) => log.append('tool_call', { step: i }))
+      )
+      await log.seal()
+      await log.close()
+
+      const seqs = (await new FileAuditLog({ keypair, path: p, sealed: true }).export()).map(e => e.seq)
+      assert.deepEqual(seqs, Array.from({ length: 50 }, (_, i) => i))
+      const result = await new FileAuditLog({ keypair, path: p, sealed: true }).verify(keypair.publicKey)
+      assert.equal(result.valid, true)
+      assert.equal(result.count, 50)
+      assert.equal(result.unsealed, 0)
+    } finally {
+      try { unlinkSync(p) } catch { /* ok */ }
+      try { unlinkSync(p + '.seals') } catch { /* ok */ }
+    }
+  })
+
+  test('a second writer is refused rather than allowed to fork the chain', async () => {
+    const p = join(tmpdir(), `kxco-audit-twowriter-${process.pid}.ndjson`)
+    try {
+      const log = new FileAuditLog({ keypair, path: p, sealed: true })
+      await log.append('op1', {})
+      writeFileSync(p, readFileSync(p, 'utf8') + '{"seq":1,"forged":true}\n')
+      await assert.rejects(() => log.seal(), /Something else wrote to this log/)
+      await assert.rejects(() => log.close(), /Something else wrote to this log/)
+    } finally { try { unlinkSync(p) } catch { /* ok */ } }
+  })
+
+  test('a torn final line is named, not skipped', async () => {
+    const p = join(tmpdir(), `kxco-audit-torn-${process.pid}.ndjson`)
+    try {
+      const log = new FileAuditLog({ keypair, path: p })
+      await log.append('op1', {})
+      await log.close()
+      writeFileSync(p, readFileSync(p, 'utf8') + '{"seq":1,"timestamp":"2026-')
+      await assert.rejects(
+        () => new FileAuditLog({ keypair, path: p }).verify(keypair.publicKey),
+        /line 2 is not valid JSON/
+      )
+    } finally { try { unlinkSync(p) } catch { /* ok */ } }
+  })
+
+  test('stream() yields entries without loading the log', async () => {
+    const p = join(tmpdir(), `kxco-audit-stream-${process.pid}.ndjson`)
+    try {
+      const log = new FileAuditLog({ keypair, path: p, sealed: true })
+      for (let i = 0; i < 5; i++) await log.append('tool_call', { step: i })
+      await log.close()
+
+      const seen = []
+      for await (const entry of new FileAuditLog({ keypair, path: p, sealed: true }).stream()) {
+        seen.push(entry.seq)
+      }
+      assert.deepEqual(seen, [0, 1, 2, 3, 4])
+    } finally { try { unlinkSync(p) } catch { /* ok */ } }
+  })
+
+  test('a missing file streams as an empty log rather than throwing', async () => {
+    const p = join(tmpdir(), `kxco-audit-absent-${process.pid}.ndjson`)
+    const result = await new FileAuditLog({ keypair, path: p }).verify(keypair.publicKey)
+    assert.equal(result.valid, true)
+    assert.equal(result.count, 0)
+  })
+
   test('verify fails on broken prevHash chain', async () => {
     const p = join(tmpdir(), `kxco-audit-chain-${process.pid}.ndjson`)
     try {
       const log = new FileAuditLog({ keypair, path: p })
       await log.append('op1', {})
       await log.append('op2', {})
+      await log.close()
       const lines = readFileSync(p, 'utf8').trim().split('\n')
       const e2 = JSON.parse(lines[1])
       e2.prevHash = 'tampered'

@@ -78,7 +78,7 @@ await log.append('key.rotate',  { keyId: 'signing-key-v2', alg: 'ml-dsa-65' })
 const result = await log.verify(keypair.publicKey)
 // { valid: true, count: 3 }
 
-const entries = await log.entries()
+const entries = await log.export()
 // array of signed entry objects
 ```
 
@@ -96,6 +96,7 @@ In-memory log. Entries are lost when the process exits.
 | `chain` | `KxcoChain` | No | `null` | Chain instance for checkpoint anchoring |
 | `checkpointEvery` | `number` | No | `100` | Anchor a checkpoint every N entries |
 | `institutionKid` | `string` | No | `null` | Identifier included in checkpoint metadata |
+| `sealed` | `boolean` | No | `false` | Sign once per run instead of once per entry. See [Sealed logs](#sealed-logs) |
 
 ### `new FileAuditLog(options)`
 
@@ -104,6 +105,15 @@ Append-only NDJSON file backend. Survives process restarts. Accepts all the same
 | Option | Type | Required | Description |
 |---|---|---|---|
 | `path` | `string` | Yes | Path to the `.ndjson` file (created if absent) |
+| `idleReleaseMs` | `number` | No | Release the write handle after this long without a write (default `2000`) |
+
+Entries are read as a stream and never all at once, and writes go through one handle held open while the log is busy. Both mean cost per entry does not grow with the file.
+
+**One file has one writer.** A signed chain cannot have two: both would build on the same tail and the second entry would take the first one's place. Every seal and every `close()` checks the file is the size this instance left it, and throws if it is not.
+
+### `log.close()`
+
+`FileAuditLog` only. Releases the write handle. Not required, since the handle is released after `idleReleaseMs` without a write, but call it when you want the descriptor back at a known point. Throws if another writer has touched the file.
 
 ### `log.append(operation, metadata)`
 
@@ -115,6 +125,8 @@ Appends a signed, hash-chained entry.
 
 If chain anchoring is configured and the entry count is a multiple of `checkpointEvery`, a fire-and-forget checkpoint is sent to the relay. The `append` call resolves immediately — it does not wait for the chain.
 
+Appending needs the previous entry's hash, not the log, so it costs the same on ten entries and on ten million. Concurrent calls are serialised internally: two appends in flight together cannot take the same `seq`.
+
 ### `log.verify(publicKey)`
 
 Replays the entire log from entry 0. For each entry, checks:
@@ -122,11 +134,37 @@ Replays the entire log from entry 0. For each entry, checks:
 1. `prevHash` matches the SHA-256 of the previous entry (including its signature)
 2. The ML-DSA-65 signature is valid over the canonical signing bytes
 
-Returns `{ valid: true, count }` or `{ valid: false, error }` describing the first failure.
+Returns `{ valid: true, count }` or `{ valid: false, error }` describing the first failure. On a sealed log it checks the chain and every seal instead, and adds `sealedThrough` and `unsealed`.
 
-### `log.entries()`
+It streams, so memory is bounded by one entry rather than by the log: 50,000 entries verify in 729 ms without holding them.
 
-Returns all entries as an array. Equivalent to `log.export()`.
+### `log.seal()`
+
+Sealed logs only. Signs everything appended since the last seal, as one run, and returns the seal. Returns `null` when nothing is unsealed, and throws on a log built without `sealed: true`.
+
+If chain anchoring is configured, the run's root is anchored fire-and-forget. A sealed log anchors when it seals rather than every `checkpointEvery` entries.
+
+### `log.seals()`
+
+Sealed logs only. Returns every seal, oldest first.
+
+### `log.export()`
+
+Returns all entries as an array, in seq order. Holds the whole log in memory by definition; prefer `stream()` on a large one.
+
+### `log.stream()`
+
+Yields entries one at a time, in seq order. Memory stays bounded by a single entry however long the log is.
+
+```js
+for await (const entry of log.stream()) {
+  if (entry.operation === 'tool_call') console.log(entry.seq, entry.metadata.tool)
+}
+```
+
+### `log.unsealedCount()`
+
+Sealed logs only. Entries appended since the last seal, without replaying the log. Always `0` on a classic log.
 
 ## Entry format
 
@@ -142,6 +180,45 @@ Returns all entries as an array. Equivalent to `log.export()`.
 ```
 
 `prevHash` is the SHA-256 of the complete previous entry (signature included). The first entry always has `prevHash: null`. The signing message covers every field except `signature` itself.
+
+## Sealed logs
+
+By default every entry carries its own ML-DSA-65 signature. That signature is also the entire cost of the log. Measured here over 10,000 entries:
+
+| | entries/s | bytes/entry | 10k run | verify |
+|---|---|---|---|---|
+| signature per entry | 129 | 4,794 | 45.7 MB | 20.1 s |
+| signature per run | 46,544 | 367 | 3.5 MB | 0.11 s |
+
+Of those 4,794 bytes, 4,412 are the signature. Anything with real entry volume cannot afford one per entry.
+
+`sealed: true` keeps the hash chain on every entry and moves the signature to the run:
+
+```js
+const log = new AuditLog({ keypair, sealed: true })
+
+for (const call of agentToolCalls) {
+  await log.append('tool_call', call)   // chained, not signed
+}
+
+const seal = await log.seal()           // one signature for the whole run
+// { fromSeq: 0, toSeq: 9999, entryCount: 10000, prevRoot, rootHash, timestamp, signature }
+```
+
+The chain is what detects tampering, and it is untouched. An entry edited, removed, reordered or inserted after sealing fails to reproduce the run's `rootHash`. Seals chain to one another by `prevRoot`, so removing a whole seal breaks the seal that follows it.
+
+`verify()` on a sealed log reports where the signed record stops:
+
+```js
+await log.verify(publicKey)
+// { valid: true, count: 10002, sealedThrough: 9999, unsealed: 2 }
+```
+
+Entries appended since the last seal are chained and unsigned. `unsealed` is that window, reported rather than counted as proven. Call `seal()` to close it.
+
+What sealing costs you: a single entry can no longer be verified on its own, only as part of its run.
+
+`FileAuditLog` writes seals to `<path>.seals`, so a reader that knows only about entries is unaffected.
 
 ## Chain anchoring
 
